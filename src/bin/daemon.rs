@@ -13,8 +13,6 @@ use tokio::time::{timeout, Duration};
 
 const MAX_SLOTS: usize = 9;
 const SHELF_WORKSPACE_NAME: &str = "shelf";
-// Disabled while investigating black previews. Re-enable after screenshot capture is fixed.
-const THUMBNAILS_ENABLED: bool = false;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ShelvedWindow {
@@ -183,6 +181,7 @@ async fn capture_window(window_id: u64) -> Result<PathBuf> {
     match send_niri_request(Request::Action(Action::ScreenshotWindow {
         id: Some(window_id),
         write_to_disk: true,
+        show_pointer: false,
         path: Some(path.to_string_lossy().into_owned()),
     }))
     .await?
@@ -305,13 +304,11 @@ async fn process_command(
                 }
             }
 
-            if THUMBNAILS_ENABLED {
-                if let Err(error) = capture_window(window.id).await {
-                    eprintln!(
-                        "Screenshot preview for window {} failed: {error}",
-                        window.id
-                    );
-                }
+            if let Err(error) = capture_window(window.id).await {
+                eprintln!(
+                    "Screenshot preview for window {} failed: {error}",
+                    window.id
+                );
             }
             move_window(
                 window.id,
@@ -361,13 +358,11 @@ async fn process_command(
                 .workspace_id
                 .context("focused window is not on a workspace")?;
 
-            if THUMBNAILS_ENABLED {
-                if let Err(error) = capture_window(window.id).await {
-                    eprintln!(
-                        "Screenshot preview for window {} failed: {error}",
-                        window.id
-                    );
-                }
+            if let Err(error) = capture_window(window.id).await {
+                eprintln!(
+                    "Screenshot preview for window {} failed: {error}",
+                    window.id
+                );
             }
 
             if let Some(previous_entry) = previous_window {

@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use niri_shelf::{get_control_socket_path, ClientCommand, ClientResponse};
+use niri_shelf::{get_control_socket_path, get_thumbnail_path, ClientCommand, ClientResponse};
 use std::io::Read;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream, UnixStream};
@@ -26,6 +26,8 @@ button { min-height: clamp(150px, 25vh, 250px); padding: 22px; border: 1px solid
 button:hover:not(:disabled), button:focus-visible { outline: none; border-color: #9b8cff; background: linear-gradient(145deg, #292844, #1b2030); transform: translateY(-2px); }
 button:disabled { cursor: default; opacity: .58; }
 .number { display: inline-grid; place-items: center; width: 36px; height: 36px; border-radius: 10px; background: #30394b; color: #d9d3ff; font-weight: 700; }
+.preview { display: block; width: 100%; aspect-ratio: 16 / 9; margin-top: 16px; border-radius: 10px; object-fit: cover; background: #10131b; }
+.preview[hidden] { display: none; }
 .title { display: block; margin-top: 20px; font-size: clamp(16px, 2vw, 22px); font-weight: 600; overflow-wrap: anywhere; }
 .empty { color: #78849a; font-weight: 400; }
 @media (max-width: 700px) { body { padding: 20px; } main { grid-template-columns: repeat(2, minmax(0, 1fr)); } header { align-items: start; flex-direction: column; } #message { text-align: left; } }
@@ -49,10 +51,14 @@ function renderSlots(slots) {
       const number = document.createElement("span");
       number.className = "number";
       number.textContent = slot.slot;
+      const preview = document.createElement("img");
+      preview.className = "preview";
+      preview.alt = "";
+      preview.hidden = true;
       const title = document.createElement("span");
-      button.append(number, title);
+      button.append(number, preview, title);
       button.addEventListener("click", () => fetchWindow(slot.slot));
-      card = { button, title };
+      card = { button, preview, title, windowId: null };
       cards.set(slot.slot, card);
       slotsElement.append(button);
     }
@@ -63,7 +69,15 @@ function renderSlots(slots) {
       : `Fetch ${slot.title || "untitled window"} from slot ${slot.slot}`);
     card.title.className = slot.window_id === null ? "title empty" : "title";
     card.title.textContent = slot.window_id === null ? "Empty slot" : (slot.title || "Untitled window");
-
+    if (card.windowId !== slot.window_id) {
+      card.windowId = slot.window_id;
+      card.preview.hidden = slot.window_id === null;
+      if (slot.window_id === null) {
+        card.preview.removeAttribute("src");
+      } else {
+        card.preview.src = `/api/preview/${slot.window_id}?token=${requestToken}`;
+      }
+    }
   }
   messageElement.textContent = "Click a window to restore it";
 }
@@ -269,6 +283,56 @@ async fn handle_http(mut stream: TcpStream, token: &str) -> Result<()> {
         return stream_events(stream).await;
     }
 
+    if method == "GET" && path.starts_with("/api/preview/") {
+        let query_token = query
+            .split('&')
+            .find_map(|parameter| parameter.strip_prefix("token="));
+        if query_token != Some(token) {
+            return write_http_response(
+                stream,
+                "403 Forbidden",
+                "application/json",
+                json_error("missing or invalid request token").as_bytes(),
+            )
+            .await;
+        }
+
+        let image_response = match path["/api/preview/".len()..].parse::<u64>() {
+            Ok(window_id) => match get_thumbnail_path(window_id) {
+                Ok(path) => match tokio::fs::read(path).await {
+                    Ok(image) => ("200 OK", "image/png", image),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => (
+                        "404 Not Found",
+                        "application/json",
+                        json_error("preview not found").into_bytes(),
+                    ),
+                    Err(error) => (
+                        "500 Internal Server Error",
+                        "application/json",
+                        json_error(&error.to_string()).into_bytes(),
+                    ),
+                },
+                Err(error) => (
+                    "500 Internal Server Error",
+                    "application/json",
+                    json_error(&error).into_bytes(),
+                ),
+            },
+            Err(_) => (
+                "400 Bad Request",
+                "application/json",
+                json_error("invalid window id").into_bytes(),
+            ),
+        };
+        return write_http_response(
+            stream,
+            image_response.0,
+            image_response.1,
+            &image_response.2,
+        )
+        .await;
+    }
+
     let (status, content_type, body) = match (method, path) {
         ("GET", "/") => (
             "200 OK",
@@ -463,9 +527,9 @@ mod tests {
         assert!(response.starts_with("HTTP/1.1 200 OK"));
         assert!(response.contains("const requestToken = \"test-token\";"));
         assert!(response.contains("new EventSource(`/events?token=${requestToken}`)"));
+        assert!(response.contains("/api/preview/${slot.window_id}?token=${requestToken}"));
         assert!(!response.contains("setInterval"));
         assert!(!response.contains("replaceChildren"));
-        assert!(!response.contains("/api/preview/"));
         assert!(!response.contains("__REQUEST_TOKEN__"));
     }
 
@@ -473,6 +537,17 @@ mod tests {
     async fn fetch_requires_the_request_token() {
         let response = request_overview(
             "POST /api/fetch/1 HTTP/1.1\r\nHost: localhost\r\n\r\n",
+            "test-token",
+        )
+        .await;
+
+        assert!(response.starts_with("HTTP/1.1 403 Forbidden"));
+    }
+
+    #[tokio::test]
+    async fn preview_requires_the_request_token() {
+        let response = request_overview(
+            "GET /api/preview/12 HTTP/1.1\r\nHost: localhost\r\n\r\n",
             "test-token",
         )
         .await;
