@@ -1,0 +1,53 @@
+// Replace the output names with those shown by `niri msg outputs`.
+workspace "shelf" {
+    open-on-output "eDP-1"
+}
+
+workspace "shelf-overview" {
+    open-on-output "DP-2"
+}
+
+window-rule {
+    match title="^Niri Shelf$"
+    open-on-workspace "shelf-overview"
+}
+
+// Keep the parked windows on the primary output's inactive "shelf" workspace.
+// The overview launches Firefox in kiosk mode; set NIRI_SHELF_BROWSER to override its executable.
+spawn-at-startup "niri-shelf-daemon"
+spawn-at-startup "niri-shelf-ctl" "overview"
+
+binds {
+    // Store the focused window in a slot.
+    Mod+Shift+1 { spawn "niri-shelf-ctl" "store" "1"; }
+    Mod+Shift+2 { spawn "niri-shelf-ctl" "store" "2"; }
+    Mod+Shift+3 { spawn "niri-shelf-ctl" "store" "3"; }
+    Mod+Shift+4 { spawn "niri-shelf-ctl" "store" "4"; }
+    Mod+Shift+5 { spawn "niri-shelf-ctl" "store" "5"; }
+    Mod+Shift+6 { spawn "niri-shelf-ctl" "store" "6"; }
+    Mod+Shift+7 { spawn "niri-shelf-ctl" "store" "7"; }
+    Mod+Shift+8 { spawn "niri-shelf-ctl" "store" "8"; }
+    Mod+Shift+9 { spawn "niri-shelf-ctl" "store" "9"; }
+
+    // Fetch and focus a window from its slot.
+    Mod+1 { spawn "niri-shelf-ctl" "fetch" "1"; }
+    Mod+2 { spawn "niri-shelf-ctl" "fetch" "2"; }
+    Mod+3 { spawn "niri-shelf-ctl" "fetch" "3"; }
+    Mod+4 { spawn "niri-shelf-ctl" "fetch" "4"; }
+    Mod+5 { spawn "niri-shelf-ctl" "fetch" "5"; }
+    Mod+6 { spawn "niri-shelf-ctl" "fetch" "6"; }
+    Mod+7 { spawn "niri-shelf-ctl" "fetch" "7"; }
+    Mod+8 { spawn "niri-shelf-ctl" "fetch" "8"; }
+    Mod+9 { spawn "niri-shelf-ctl" "fetch" "9"; }
+
+    // Swap the focused window with the contents of a slot.
+    Mod+Ctrl+1 { spawn "niri-shelf-ctl" "swap" "1"; }
+    Mod+Ctrl+2 { spawn "niri-shelf-ctl" "swap" "2"; }
+    Mod+Ctrl+3 { spawn "niri-shelf-ctl" "swap" "3"; }
+    Mod+Ctrl+4 { spawn "niri-shelf-ctl" "swap" "4"; }
+    Mod+Ctrl+5 { spawn "niri-shelf-ctl" "swap" "5"; }
+    Mod+Ctrl+6 { spawn "niri-shelf-ctl" "swap" "6"; }
+    Mod+Ctrl+7 { spawn "niri-shelf-ctl" "swap" "7"; }
+    Mod+Ctrl+8 { spawn "niri-shelf-ctl" "swap" "8"; }
+    Mod+Ctrl+9 { spawn "niri-shelf-ctl" "swap" "9"; }
+}
