@@ -7,16 +7,17 @@ pub enum ClientCommand {
     Fetch { slot: usize },
     Swap { slot: usize },
     Status,
+    Subscribe,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ClientResponse {
     Success,
     Status(Vec<SlotInfo>),
     Error { message: String },
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub struct SlotInfo {
     pub slot: usize,
     pub window_id: Option<u64>,

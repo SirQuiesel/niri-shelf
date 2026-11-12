@@ -1,8 +1,9 @@
 use anyhow::{Context, Result};
-use niri_shelf::{get_control_socket_path, get_thumbnail_path, ClientCommand, ClientResponse};
+use niri_shelf::{get_control_socket_path, ClientCommand, ClientResponse};
 use std::io::Read;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream, UnixStream};
+use tokio::time::{sleep, Duration, Instant};
 
 const OVERVIEW_HTML: &str = r##"<!doctype html>
 <html lang="en">
@@ -25,7 +26,6 @@ button { min-height: clamp(150px, 25vh, 250px); padding: 22px; border: 1px solid
 button:hover:not(:disabled), button:focus-visible { outline: none; border-color: #9b8cff; background: linear-gradient(145deg, #292844, #1b2030); transform: translateY(-2px); }
 button:disabled { cursor: default; opacity: .58; }
 .number { display: inline-grid; place-items: center; width: 36px; height: 36px; border-radius: 10px; background: #30394b; color: #d9d3ff; font-weight: 700; }
-.preview { display: block; width: 100%; aspect-ratio: 16 / 9; margin-top: 16px; border-radius: 10px; object-fit: cover; background: #10131b; }
 .title { display: block; margin-top: 20px; font-size: clamp(16px, 2vw, 22px); font-weight: 600; overflow-wrap: anywhere; }
 .empty { color: #78849a; font-weight: 400; }
 @media (max-width: 700px) { body { padding: 20px; } main { grid-template-columns: repeat(2, minmax(0, 1fr)); } header { align-items: start; flex-direction: column; } #message { text-align: left; } }
@@ -39,44 +39,33 @@ const slotsElement = document.querySelector("#slots");
 const messageElement = document.querySelector("#message");
 const requestToken = "__REQUEST_TOKEN__";
 let busy = false;
-let lastSlots = "";
-async function refresh() {
-  if (busy) return;
-  try {
-    const response = await fetch("/api/status", { cache: "no-store" });
-    if (!response.ok) throw new Error(`Status request failed (${response.status})`);
-    const slots = await response.json();
-    const signature = JSON.stringify(slots);
-    if (signature === lastSlots) return;
-    lastSlots = signature;
-    slotsElement.replaceChildren(...slots.map(slot => {
+const cards = new Map();
+function renderSlots(slots) {
+  for (const slot of slots) {
+    let card = cards.get(slot.slot);
+    if (!card) {
       const button = document.createElement("button");
       button.type = "button";
-      button.disabled = slot.window_id === null;
-      button.setAttribute("aria-label", slot.window_id === null ? `Slot ${slot.slot}, empty` : `Fetch ${slot.title || "untitled window"} from slot ${slot.slot}`);
       const number = document.createElement("span");
       number.className = "number";
       number.textContent = slot.slot;
-      button.append(number);
-      if (slot.window_id !== null) {
-        const preview = document.createElement("img");
-        preview.className = "preview";
-        preview.alt = "";
-        preview.src = `/api/preview/${slot.window_id}?token=${requestToken}&v=${Date.now()}`;
-        preview.addEventListener("error", () => preview.remove());
-        button.append(preview);
-      }
       const title = document.createElement("span");
-      title.className = slot.window_id === null ? "title empty" : "title";
-      title.textContent = slot.window_id === null ? "Empty slot" : (slot.title || "Untitled window");
-      button.append(title);
+      button.append(number, title);
       button.addEventListener("click", () => fetchWindow(slot.slot));
-      return button;
-    }));
-    messageElement.textContent = "Click a window to restore it";
-  } catch (error) {
-    messageElement.textContent = error.message;
+      card = { button, title };
+      cards.set(slot.slot, card);
+      slotsElement.append(button);
+    }
+
+    card.button.disabled = slot.window_id === null;
+    card.button.setAttribute("aria-label", slot.window_id === null
+      ? `Slot ${slot.slot}, empty`
+      : `Fetch ${slot.title || "untitled window"} from slot ${slot.slot}`);
+    card.title.className = slot.window_id === null ? "title empty" : "title";
+    card.title.textContent = slot.window_id === null ? "Empty slot" : (slot.title || "Untitled window");
+
   }
+  messageElement.textContent = "Click a window to restore it";
 }
 async function fetchWindow(slot) {
   if (busy) return;
@@ -90,15 +79,28 @@ async function fetchWindow(slot) {
     const result = await response.json();
     if (!response.ok) throw new Error(result.error || `Restore failed (${response.status})`);
     messageElement.textContent = `Restored slot ${slot}`;
-    await refresh();
   } catch (error) {
     messageElement.textContent = error.message;
   } finally {
     busy = false;
   }
 }
-refresh();
-setInterval(refresh, 1000);
+const updates = new EventSource(`/events?token=${requestToken}`);
+updates.onopen = () => { messageElement.textContent = "Overview connected; waiting for shelf…"; };
+updates.addEventListener("connection", event => {
+  const status = JSON.parse(event.data);
+  messageElement.textContent = status.state === "connected"
+    ? "Connected to shelf"
+    : "Waiting for shelf daemon…";
+});
+updates.onmessage = event => {
+  try {
+    renderSlots(JSON.parse(event.data));
+  } catch (error) {
+    messageElement.textContent = `Invalid shelf update: ${error.message}`;
+  }
+};
+updates.onerror = () => { messageElement.textContent = "Reconnecting to shelf…"; };
 </script>
 </body>
 </html>"##;
@@ -150,6 +152,15 @@ async fn main() -> Result<()> {
     }
 }
 
+async fn write_connection_status(stream: &mut TcpStream, state: &str) -> Result<()> {
+    let data = serde_json::json!({ "state": state }).to_string();
+    stream.write_all(b"event: connection\ndata: ").await?;
+    stream.write_all(data.as_bytes()).await?;
+    stream.write_all(b"\n\n").await?;
+    stream.flush().await?;
+    Ok(())
+}
+
 async fn send_command(cmd: ClientCommand) -> Result<ClientResponse> {
     let socket_path = get_control_socket_path();
     let mut stream = UnixStream::connect(&socket_path)
@@ -168,6 +179,7 @@ async fn send_command(cmd: ClientCommand) -> Result<ClientResponse> {
 }
 
 async fn overview() -> Result<()> {
+    wait_for_daemon().await?;
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let address = listener.local_addr()?;
     let url = format!("http://{address}/");
@@ -187,6 +199,28 @@ async fn overview() -> Result<()> {
                 eprintln!("Overview request failed: {error}");
             }
         });
+    }
+}
+
+async fn wait_for_daemon() -> Result<()> {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut next_report = Instant::now();
+    loop {
+        let status = match send_command(ClientCommand::Status).await {
+            Ok(ClientResponse::Status(_)) => return Ok(()),
+            Ok(ClientResponse::Error { message }) => message,
+            Ok(ClientResponse::Success) => "unexpected status response".to_string(),
+            Err(error) => error.to_string(),
+        };
+        if Instant::now() >= next_report {
+            eprintln!("Waiting for niri-shelf-daemon: {status}");
+            next_report = Instant::now() + Duration::from_secs(5);
+        }
+
+        if Instant::now() >= deadline {
+            anyhow::bail!("niri-shelf-daemon did not become ready within 30 seconds");
+        }
+        sleep(Duration::from_millis(250)).await;
     }
 }
 
@@ -219,7 +253,7 @@ async fn handle_http(mut stream: TcpStream, token: &str) -> Result<()> {
             .then(|| value.trim())
     });
     let token_is_valid = request_token == Some(token);
-    if method == "GET" && path.starts_with("/api/preview/") {
+    if method == "GET" && path == "/events" {
         let query_token = query
             .split('&')
             .find_map(|parameter| parameter.strip_prefix("token="));
@@ -232,41 +266,7 @@ async fn handle_http(mut stream: TcpStream, token: &str) -> Result<()> {
             )
             .await;
         }
-
-        let image_response = match path["/api/preview/".len()..].parse::<u64>() {
-            Ok(window_id) => match get_thumbnail_path(window_id) {
-                Ok(path) => match tokio::fs::read(path).await {
-                    Ok(image) => ("200 OK", "image/png", image),
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => (
-                        "404 Not Found",
-                        "application/json",
-                        json_error("preview not found").into_bytes(),
-                    ),
-                    Err(error) => (
-                        "500 Internal Server Error",
-                        "application/json",
-                        json_error(&error.to_string()).into_bytes(),
-                    ),
-                },
-                Err(error) => (
-                    "500 Internal Server Error",
-                    "application/json",
-                    json_error(&error).into_bytes(),
-                ),
-            },
-            Err(_) => (
-                "400 Bad Request",
-                "application/json",
-                json_error("invalid window id").into_bytes(),
-            ),
-        };
-        return write_http_response(
-            stream,
-            image_response.0,
-            image_response.1,
-            &image_response.2,
-        )
-        .await;
+        return stream_events(stream).await;
     }
 
     let (status, content_type, body) = match (method, path) {
@@ -342,6 +342,72 @@ async fn handle_http(mut stream: TcpStream, token: &str) -> Result<()> {
     write_http_response(stream, status, content_type, body.as_bytes()).await
 }
 
+async fn stream_events(mut stream: TcpStream) -> Result<()> {
+    stream_events_at(&mut stream, get_control_socket_path()).await
+}
+
+async fn stream_events_at(stream: &mut TcpStream, socket_path: std::path::PathBuf) -> Result<()> {
+    let headers = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\nX-Content-Type-Options: nosniff\r\n\r\n";
+    stream.write_all(headers.as_bytes()).await?;
+    loop {
+        let mut daemon = match UnixStream::connect(&socket_path).await {
+            Ok(daemon) => daemon,
+            Err(error) => {
+                write_connection_status(stream, "waiting").await?;
+                eprintln!("Shelf update stream waiting for daemon: {error}");
+                sleep(Duration::from_secs(1)).await;
+                continue;
+            }
+        };
+        let mut command = serde_json::to_string(&ClientCommand::Subscribe)?;
+        command.push('\n');
+        if let Err(error) = daemon.write_all(command.as_bytes()).await {
+            eprintln!("Shelf update stream could not subscribe to daemon: {error}");
+            write_connection_status(stream, "waiting").await?;
+            sleep(Duration::from_secs(1)).await;
+            continue;
+        }
+
+        write_connection_status(stream, "connected").await?;
+        let mut daemon = BufReader::new(daemon);
+        let mut line = String::new();
+        loop {
+            line.clear();
+            match daemon.read_line(&mut line).await {
+                Ok(0) => break,
+                Ok(_) => {}
+                Err(error) => {
+                    eprintln!("Shelf update stream disconnected from daemon: {error}");
+                    break;
+                }
+            }
+            let event_data = match serde_json::from_str::<ClientResponse>(&line) {
+                Ok(ClientResponse::Status(slots)) => serde_json::to_string(&slots)?,
+                Ok(ClientResponse::Error { message }) => {
+                    serde_json::json!({ "error": message }).to_string()
+                }
+                Ok(ClientResponse::Success) => continue,
+                Err(error) => {
+                    eprintln!("Invalid shelf update from daemon: {error}");
+                    break;
+                }
+            };
+            if stream.write_all(b"data: ").await.is_err()
+                || stream.write_all(event_data.as_bytes()).await.is_err()
+                || stream.write_all(b"\n\n").await.is_err()
+                || stream.flush().await.is_err()
+            {
+                return Ok(());
+            }
+        }
+        stream
+            .write_all(b": reconnecting to shelf daemon\n\n")
+            .await?;
+        stream.flush().await?;
+        sleep(Duration::from_secs(1)).await;
+    }
+}
+
 async fn write_http_response(
     mut stream: TcpStream,
     status: &str,
@@ -370,6 +436,7 @@ fn random_token() -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::net::UnixListener;
 
     async fn request_overview(request: &str, token: &str) -> String {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -395,6 +462,10 @@ mod tests {
 
         assert!(response.starts_with("HTTP/1.1 200 OK"));
         assert!(response.contains("const requestToken = \"test-token\";"));
+        assert!(response.contains("new EventSource(`/events?token=${requestToken}`)"));
+        assert!(!response.contains("setInterval"));
+        assert!(!response.contains("replaceChildren"));
+        assert!(!response.contains("/api/preview/"));
         assert!(!response.contains("__REQUEST_TOKEN__"));
     }
 
@@ -410,13 +481,94 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn preview_requires_the_request_token() {
+    async fn event_stream_requires_the_request_token() {
         let response = request_overview(
-            "GET /api/preview/12 HTTP/1.1\r\nHost: localhost\r\n\r\n",
+            "GET /events?token=wrong HTTP/1.1\r\nHost: localhost\r\n\r\n",
             "test-token",
         )
         .await;
 
         assert!(response.starts_with("HTTP/1.1 403 Forbidden"));
+    }
+
+    #[tokio::test]
+    async fn event_stream_recovers_when_daemon_starts_late() {
+        let socket_path = std::env::temp_dir().join(format!(
+            "niri-shelf-test-{}-{}.sock",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server_path = socket_path.clone();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            stream_events_at(&mut stream, server_path).await.unwrap();
+        });
+
+        let mut client = TcpStream::connect(address).await.unwrap();
+        let mut reader = BufReader::new(&mut client);
+        let mut line = String::new();
+        loop {
+            line.clear();
+            reader.read_line(&mut line).await.unwrap();
+            if line == "\r\n" {
+                break;
+            }
+        }
+        line.clear();
+        reader.read_line(&mut line).await.unwrap();
+        assert_eq!(line, "event: connection\n");
+        line.clear();
+        reader.read_line(&mut line).await.unwrap();
+        assert_eq!(line, "data: {\"state\":\"waiting\"}\n");
+        line.clear();
+        reader.read_line(&mut line).await.unwrap();
+        assert_eq!(line, "\n");
+
+        let daemon = UnixListener::bind(&socket_path).unwrap();
+        let (mut daemon_stream, _) = daemon.accept().await.unwrap();
+        let mut daemon_reader = BufReader::new(&mut daemon_stream);
+        line.clear();
+        daemon_reader.read_line(&mut line).await.unwrap();
+        assert!(matches!(
+            serde_json::from_str::<ClientCommand>(&line).unwrap(),
+            ClientCommand::Subscribe
+        ));
+
+        let status = ClientResponse::Status(vec![niri_shelf::SlotInfo {
+            slot: 1,
+            window_id: Some(23),
+            title: Some("Ready".to_string()),
+        }]);
+        let mut status_line = serde_json::to_string(&status).unwrap();
+        status_line.push('\n');
+        daemon_reader
+            .get_mut()
+            .write_all(status_line.as_bytes())
+            .await
+            .unwrap();
+
+        line.clear();
+        reader.read_line(&mut line).await.unwrap();
+        assert_eq!(line, "event: connection\n");
+        line.clear();
+        reader.read_line(&mut line).await.unwrap();
+        assert_eq!(line, "data: {\"state\":\"connected\"}\n");
+        line.clear();
+        reader.read_line(&mut line).await.unwrap();
+        assert_eq!(line, "\n");
+        line.clear();
+        reader.read_line(&mut line).await.unwrap();
+        assert!(line.starts_with("data: "));
+        assert!(line.contains("\"window_id\":23"));
+
+        server.abort();
+        drop(daemon_reader);
+        drop(daemon);
+        let _ = tokio::fs::remove_file(socket_path).await;
     }
 }

@@ -4,8 +4,7 @@
 `niri-shelf` lets you park up to nine windows on a dedicated Niri workspace and
 restore one with a keybind or by clicking it in a graphical overview. The
 overview is a small local web app opened in Firefox kiosk mode; it is intended
-to live on a secondary monitor and shows a screenshot preview for each stored
-window.
+to live on a secondary monitor and shows the stored windows by title.
 
 ## Requirements
 
@@ -13,7 +12,6 @@ window.
 - Rust and Cargo
 - Firefox (or another browser that supports `--new-window --kiosk`)
 - Two connected outputs if you want to use the secondary-monitor layout
-- A Niri version with the `screenshot-window` IPC action
 
 ## Install
 
@@ -119,7 +117,11 @@ niri-shelf-ctl overview
 The overview starts Firefox and serves its UI on a randomly selected
 localhost-only port. Closing Firefox does not stop the local server; terminate
 the `niri-shelf-ctl overview` process to stop it. The daemon must remain running
-for store, fetch, swap, and status commands.
+for store, fetch, swap, and status commands. The overview receives slot and
+title changes over a persistent local event stream rather than polling, and
+updates existing cards in place so window previews stay still. At startup, the
+overview waits up to 30 seconds for the daemon, so Niri can launch both startup
+commands concurrently. Its event stream also reconnects if the daemon restarts.
 
 ## Commands
 
@@ -134,10 +136,12 @@ niri-shelf-ctl status
 replace a different window already in that slot; use `swap` to replace it.
 `fetch` returns the window to the exact workspace it was on when stored, then
 focuses it; Niri consequently switches to that workspace and its monitor if
-needed. `swap` also remembers the current window's original workspace.
-The overview captures a screenshot when a window is stored. Previews are saved
-under `$XDG_CACHE_HOME/niri-shelf` (or `~/.cache/niri-shelf` when
-`XDG_CACHE_HOME` is unset). Closing a stored window clears its slot.
+needed. `swap` also remembers the current window's original workspace. If
+there is no focused window when `swap` is invoked, it behaves like `fetch` and
+leaves the selected slot empty.
+Screenshot previews are temporarily disabled while investigating black images.
+Storing and restoring windows does not invoke Niri's screenshot action.
+Closing a stored window clears its slot.
 
 ## Troubleshooting
 
