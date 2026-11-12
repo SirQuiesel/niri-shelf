@@ -1,3 +1,4 @@
+# !! Vibe Coded !!
 # niri-shelf
 
 `niri-shelf` temporarily parks up to nine Niri windows on a dedicated
