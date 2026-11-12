@@ -1,111 +1,133 @@
-# !! Vibe Coded !!
 # niri-shelf
 
-`niri-shelf` lets you park up to nine windows on a dedicated Niri workspace and
-restore one with a keybind or by clicking it in a graphical overview. The
-overview is a small local web app opened in Firefox kiosk mode; it is intended
-to live on a secondary monitor and shows a screenshot preview for each stored
-window.
+`niri-shelf` temporarily parks up to nine Niri windows on a dedicated
+workspace. Restore a window with a keybind or from a small graphical overview
+that can show a screenshot preview of each stored window.
 
 ## Requirements
 
-- Niri 26.04 (the IPC library is pinned to the matching protocol version)
+- Niri 26.04 (uses the Niri 26.4 IPC protocol)
 - Rust and Cargo
-- Firefox (or another browser that supports `--new-window --kiosk`)
-- Two connected outputs if you want to use the secondary-monitor layout
+- Firefox, or a browser that accepts `--new-window --kiosk`
+- Two connected outputs for the example's secondary-monitor layout
 
 ## Install
 
-From the project directory, install both executables under `~/.local/bin`:
+From the project directory, install both programs under `~/.local/bin`:
 
 ```sh
 cargo install --path . --root "$HOME/.local"
 ```
 
-Make sure `~/.local/bin` is on `PATH` in your Niri session. For example, add
-this to your shell profile or session environment:
+Ensure that directory is on `PATH` in both your terminal and Niri session:
 
 ```sh
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
-Check that the commands are available:
+Check that both programs are installed and discoverable:
 
 ```sh
 command -v niri-shelf-daemon
 command -v niri-shelf-ctl
 ```
 
-## Update
-
-From the project directory, rebuild and replace the installed executables:
-
-```sh
-cargo install --path . --root "$HOME/.local" --force
-```
-
-Then restart the running shelf daemon so it uses the newly installed binary.
-If Niri starts the daemon and overview with `spawn-at-startup`, log out of
-Niri and back in. If you started the daemon manually, stop it with `Ctrl+C`
-and start `niri-shelf-daemon` again. The overview process should also be
-restarted if it was started manually.
-
-Both commands should print paths under your home directory, for example:
+Expected output (with your own home directory in place of `/home/alice`):
 
 ```text
 /home/alice/.local/bin/niri-shelf-daemon
 /home/alice/.local/bin/niri-shelf-ctl
 ```
 
-If either command prints nothing and returns to the prompt, continue with
-[“command not found”](#command-not-found-for-either-executable) below.
+If either command is not found, see [Troubleshooting](#troubleshooting).
+For subsequent builds, reinstall with `--force` to replace the executables:
+
+```sh
+cargo install --path . --root "$HOME/.local" --force
+```
+
+Restart the daemon and overview after updating.
 
 ## Configure Niri
 
-Copy the relevant sections from
-[`examples/niri-config.kdl`](examples/niri-config.kdl) into your Niri config,
-usually `~/.config/niri/config.kdl`. The example is a template, not a complete
-replacement config. Change `eDP-1` and `DP-2` to the output names reported by:
+Use [`examples/niri-config.kdl`](examples/niri-config.kdl) as a template and
+merge the relevant parts into your Niri configuration; it is not a complete
+configuration. The example:
+
+- reserves a `shelf` workspace on the primary output and a `shelf-overview`
+  workspace on the secondary output;
+- starts the daemon and graphical overview at login;
+- binds keys to store, fetch, and swap windows.
+
+Replace `eDP-1` and `DP-2` in the example with the output names shown by:
 
 ```sh
 niri msg outputs
 ```
 
-The `shelf` workspace should be assigned to your main output; `shelf-overview`
-and the graphical overview window should be assigned to your secondary output.
-The example starts the daemon and overview automatically at login.
+The daemon must inherit `NIRI_SOCKET` from the Niri session. Starting it with
+Niri's `spawn-at-startup` does this. Ensure the session's `PATH` includes
+`~/.local/bin` as well, so Niri can find both executables.
 
-The sample keybinds are:
+The example keybinds are:
 
-| Keybind | Action |
+| Key | Action |
 | --- | --- |
-| `Mod+Shift+1` … `Mod+Shift+9` | Store the focused window in that slot |
-| `Mod+1` … `Mod+9` | Fetch and focus the window in that slot |
-| `Mod+Ctrl+1` … `Mod+Ctrl+9` | Swap the focused window with that slot |
+| `Mod+Shift+1` … `Mod+Shift+9` | Store the focused window |
+| `Mod+1` … `Mod+9` | Fetch and focus a stored window |
+| `Mod+Ctrl+1` … `Mod+Ctrl+9` | Swap the focused window with a stored one |
 
-These are examples and may conflict with your existing Niri binds (in
-particular, `Mod+1` … `Mod+9` are often used for workspaces). Choose unused
-combinations and change the `binds` entries accordingly. Each entry invokes
-`niri-shelf-ctl` with the action and slot number, for example:
+These are examples and may conflict with your existing binds, especially
+`Mod+1` … `Mod+9`. Choose unused combinations. A bind invokes the control
+program with an action and slot number, for example:
 
 ```kdl
 Mod+Alt+1 { spawn "niri-shelf-ctl" "fetch" "1"; }
 ```
 
-Validate the edited configuration and reload it:
+Validate and reload your Niri configuration:
 
 ```sh
 niri validate
 niri msg action load-config-file
 ```
 
-If Firefox is installed under a different executable name, set
-`NIRI_SHELF_BROWSER` to that executable in the Niri session environment.
+The overview uses `firefox` by default. Set `NIRI_SHELF_BROWSER` in the Niri
+session environment to use a different browser executable.
 
-## Run manually
+## Use
 
-If you do not want to start the programs from Niri config, run the daemon in
-one terminal and start the overview in another:
+The control program supports these commands:
+
+```sh
+niri-shelf-ctl store 3
+niri-shelf-ctl fetch 3
+niri-shelf-ctl swap 3
+niri-shelf-ctl status
+```
+
+Slots are numbered 1–9. `store` moves the focused window to the shelf and
+remembers its original workspace; it will not overwrite an occupied slot.
+`fetch` restores that window to its original workspace and focuses it.
+`swap` puts the focused window in the slot and restores the previous occupant;
+if there is no focused window, it behaves like `fetch`. Closing a stored
+window clears its slot.
+
+The graphical overview starts Firefox in kiosk mode on a local-only address
+with a randomly chosen port. It waits up to 30 seconds for the daemon to start.
+Closing Firefox does not stop the overview server; stop the
+`niri-shelf-ctl overview` process to shut it down. The daemon must be running
+for all commands.
+
+Slot assignments exist only in daemon memory. Restarting the daemon clears
+them, so fetch any stored windows before restarting it. Screenshot previews are
+cached under `$XDG_CACHE_HOME/niri-shelf`, or `~/.cache/niri-shelf` if
+`XDG_CACHE_HOME` is unset.
+
+## Run without startup entries
+
+Instead of the `spawn-at-startup` entries in the example, start the programs
+manually in separate terminals within the Niri session:
 
 ```sh
 niri-shelf-daemon
@@ -115,109 +137,55 @@ niri-shelf-daemon
 niri-shelf-ctl overview
 ```
 
-The overview starts Firefox and serves its UI on a randomly selected
-localhost-only port. Closing Firefox does not stop the local server; terminate
-the `niri-shelf-ctl overview` process to stop it. The daemon must remain running
-for store, fetch, swap, and status commands. The overview receives slot and
-title changes over a persistent local event stream rather than polling, and
-updates existing cards in place so window previews stay still. At startup, the
-overview waits up to 30 seconds for the daemon, so Niri can launch both startup
-commands concurrently. Its event stream also reconnects if the daemon restarts.
-
-## Commands
-
-```sh
-niri-shelf-ctl store 3
-niri-shelf-ctl fetch 3
-niri-shelf-ctl swap 3
-niri-shelf-ctl status
-```
-
-`store` places the currently focused window in an empty slot. It does not
-replace a different window already in that slot; use `swap` to replace it.
-`fetch` returns the window to the exact workspace it was on when stored, then
-focuses it; Niri consequently switches to that workspace and its monitor if
-needed. `swap` also remembers the current window's original workspace. If
-there is no focused window when `swap` is invoked, it behaves like `fetch` and
-leaves the selected slot empty.
-The overview captures a screenshot when a window is stored and waits for Niri
-to finish saving it before moving the window to the shelf. Previews are saved
-under `$XDG_CACHE_HOME/niri-shelf` (or `~/.cache/niri-shelf` when
-`XDG_CACHE_HOME` is unset). Closing a stored window clears its slot.
-
 ## Troubleshooting
 
-- **“Is it running?”** Make sure `niri-shelf-daemon` is running and that
-  `NIRI_SOCKET` is present in its environment. Starting it with Niri's
-  `spawn-at-startup` normally provides the compositor environment.
+### `command not found`
 
-### “command not found” for either executable
+First check that Cargo installed the executables:
 
-Diagnose installation and `PATH` separately.
+```sh
+ls -l "$HOME/.local/bin/niri-shelf-daemon" "$HOME/.local/bin/niri-shelf-ctl"
+```
 
-1. In the project directory, check Cargo's install root and whether the
-   binaries are actually there:
+If either file is missing, run the install command from the project directory:
 
-   ```sh
-   printf 'HOME=%s\n' "$HOME"
-   ls -1 "$HOME/.local/bin"/niri-shelf-*
-   ```
+```sh
+cargo install --path . --root "$HOME/.local" --force
+```
 
-   `HOME` should be an absolute path such as `/home/alice`. If `ls` prints
-   both files, its output should look like this (with your own home path):
+If the files exist but `command -v` cannot find them, add their directory to
+the current shell and retry:
 
-   ```text
-   /home/alice/.local/bin/niri-shelf-ctl
-   /home/alice/.local/bin/niri-shelf-daemon
-   ```
+```sh
+export PATH="$HOME/.local/bin:$PATH"
+hash -r
+command -v niri-shelf-daemon
+command -v niri-shelf-ctl
+```
 
-   Go to step 2. If `ls` reports `No such file or directory` (or prints the
-   unmatched `niri-shelf-*` pattern), install them into that directory:
+Both `command -v` commands should print paths under `$HOME/.local/bin`.
+Persist the `PATH` change in your shell startup configuration. Niri also needs
+to inherit a `PATH` containing this directory; after changing the session
+environment, log out and back in. Use double quotes around `"$HOME/.local"`
+in the Cargo command so the shell expands your home directory.
 
-   ```sh
-   cargo install --path . --root "$HOME/.local" --force
-   ```
+### The daemon cannot connect to Niri
 
-   Cargo should finish with a line like:
+Run it from a Niri session, where `NIRI_SOCKET` is set. Niri's
+`spawn-at-startup` passes the session environment to the daemon.
 
-   ```text
-   Installed package `niri-shelf v0.1.0` (executables `niri-shelf-ctl`, `niri-shelf-daemon`)
-   ```
+### The overview does not open
 
-   Then repeat the `ls` command; it should print both paths shown above. Use
-   double quotes exactly as shown around `"$HOME/.local"`. Do not use
-   single quotes or escape the `$`: those prevent the shell from expanding
-   `HOME` and can install under a literal `$HOME` directory instead.
+Check that Firefox (or the executable named by `NIRI_SHELF_BROWSER`) is
+installed and on the Niri session's `PATH`. Check the overview process output
+for launch errors.
 
-2. Check whether the installed directory is on this shell's `PATH`:
+### A keybind switches workspaces instead
 
-   ```sh
-   printf '%s\n' "$PATH" | tr ':' '\n' | grep -Fx "$HOME/.local/bin"
-   ```
+Another Niri bind may use the same key combination. Change the example bind to
+an unused combination and reload the configuration.
 
-   If it prints `$HOME/.local/bin` as an expanded path (for example
-   `/home/alice/.local/bin`), it is on `PATH`. If it prints nothing, add it
-   to the current shell and check command lookup again:
+### The overview appears on the wrong output
 
-   ```sh
-   export PATH="$HOME/.local/bin:$PATH"
-   hash -r
-   command -v niri-shelf-daemon
-   command -v niri-shelf-ctl
-   ```
-
-   The last two commands should print the full paths to the executables,
-   for example `/home/alice/.local/bin/niri-shelf-daemon` and
-   `/home/alice/.local/bin/niri-shelf-ctl`. This `export` only fixes the
-   current shell. Add it to the startup file for your shell and open a new
-   terminal to keep it there.
-
-If `command -v` still prints nothing, compare the `HOME` printed in step 1
-with the directory where `ls` found the files. They must match. Also check
-for typos in the install command and its `--root` argument.
-- **The overview opens on the wrong output:** confirm the output names and
-  workspace placement in the Niri config, then reload it.
-- **Firefox does not start:** install Firefox, check that it is on `PATH`, or
-  set `NIRI_SHELF_BROWSER` to the browser executable name.
-- **A keybind still switches workspaces:** change the sample bind to a
-  combination not already used in your Niri config.
+Check the output names and workspace assignments in your Niri configuration,
+then reload it.
