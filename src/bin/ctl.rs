@@ -3,7 +3,7 @@ use niri_shelf::{get_control_socket_path, get_thumbnail_path, ClientCommand, Cli
 use std::io::Read;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream, UnixStream};
-use tokio::time::{sleep, Duration, Instant};
+use tokio::time::{interval_at, sleep, Duration, Instant};
 
 const OVERVIEW_HTML: &str = r##"<!doctype html>
 <html lang="en">
@@ -435,39 +435,52 @@ async fn stream_events_at(stream: &mut TcpStream, socket_path: std::path::PathBu
         write_connection_status(stream, "connected").await?;
         let mut daemon = BufReader::new(daemon);
         let mut line = String::new();
+        let mut heartbeat = interval_at(
+            Instant::now() + Duration::from_secs(15),
+            Duration::from_secs(15),
+        );
         loop {
-            line.clear();
-            match daemon.read_line(&mut line).await {
-                Ok(0) => break,
-                Ok(_) => {}
-                Err(error) => {
-                    eprintln!("Shelf update stream disconnected from daemon: {error}");
-                    break;
+            tokio::select! {
+                read = daemon.read_line(&mut line) => {
+                    match read {
+                        Ok(0) => break,
+                        Ok(_) => {}
+                        Err(error) => {
+                            eprintln!("Shelf update stream disconnected from daemon: {error}");
+                            break;
+                        }
+                    }
+                    let response = serde_json::from_str::<ClientResponse>(&line);
+                    line.clear();
+                    let event_data = match response {
+                        Ok(ClientResponse::Status(slots)) => serde_json::to_string(&slots)?,
+                        Ok(ClientResponse::Error { message }) => {
+                            serde_json::json!({ "error": message }).to_string()
+                        }
+                        Ok(ClientResponse::Success) => continue,
+                        Err(error) => {
+                            eprintln!("Invalid shelf update from daemon: {error}");
+                            break;
+                        }
+                    };
+                    if stream.write_all(b"data: ").await.is_err()
+                        || stream.write_all(event_data.as_bytes()).await.is_err()
+                        || stream.write_all(b"\n\n").await.is_err()
+                        || stream.flush().await.is_err()
+                    {
+                        return Ok(());
+                    }
                 }
-            }
-            let event_data = match serde_json::from_str::<ClientResponse>(&line) {
-                Ok(ClientResponse::Status(slots)) => serde_json::to_string(&slots)?,
-                Ok(ClientResponse::Error { message }) => {
-                    serde_json::json!({ "error": message }).to_string()
+                _ = heartbeat.tick() => {
+                    if stream.write_all(b": keepalive\n\n").await.is_err()
+                        || stream.flush().await.is_err()
+                    {
+                        return Ok(());
+                    }
                 }
-                Ok(ClientResponse::Success) => continue,
-                Err(error) => {
-                    eprintln!("Invalid shelf update from daemon: {error}");
-                    break;
-                }
-            };
-            if stream.write_all(b"data: ").await.is_err()
-                || stream.write_all(event_data.as_bytes()).await.is_err()
-                || stream.write_all(b"\n\n").await.is_err()
-                || stream.flush().await.is_err()
-            {
-                return Ok(());
             }
         }
-        stream
-            .write_all(b": reconnecting to shelf daemon\n\n")
-            .await?;
-        stream.flush().await?;
+        write_connection_status(stream, "waiting").await?;
         sleep(Duration::from_secs(1)).await;
     }
 }
@@ -567,7 +580,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn event_stream_recovers_when_daemon_starts_late() {
+    async fn event_stream_recovers_when_daemon_starts_late_and_restarts() {
         let socket_path = std::env::temp_dir().join(format!(
             "niri-shelf-test-{}-{}.sock",
             std::process::id(),
@@ -640,10 +653,72 @@ mod tests {
         reader.read_line(&mut line).await.unwrap();
         assert!(line.starts_with("data: "));
         assert!(line.contains("\"window_id\":23"));
+        line.clear();
+        reader.read_line(&mut line).await.unwrap();
+        assert_eq!(line, "\n");
+
+        drop(daemon_reader);
+        drop(daemon_stream);
+        drop(daemon);
+        tokio::fs::remove_file(&socket_path).await.unwrap();
+
+        line.clear();
+        tokio::time::timeout(Duration::from_secs(3), reader.read_line(&mut line))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(line, "event: connection\n");
+        line.clear();
+        reader.read_line(&mut line).await.unwrap();
+        assert_eq!(line, "data: {\"state\":\"waiting\"}\n");
+        line.clear();
+        reader.read_line(&mut line).await.unwrap();
+        assert_eq!(line, "\n");
+
+        let restarted_daemon = UnixListener::bind(&socket_path).unwrap();
+        let (mut restarted_stream, _) =
+            tokio::time::timeout(Duration::from_secs(3), restarted_daemon.accept())
+                .await
+                .unwrap()
+                .unwrap();
+        let mut restarted_reader = BufReader::new(&mut restarted_stream);
+        line.clear();
+        restarted_reader.read_line(&mut line).await.unwrap();
+        assert!(matches!(
+            serde_json::from_str::<ClientCommand>(&line).unwrap(),
+            ClientCommand::Subscribe
+        ));
+
+        let restarted_status = ClientResponse::Status(vec![niri_shelf::SlotInfo {
+            slot: 1,
+            window_id: Some(24),
+            title: Some("Restarted".to_string()),
+        }]);
+        let mut restarted_status_line = serde_json::to_string(&restarted_status).unwrap();
+        restarted_status_line.push('\n');
+        restarted_reader
+            .get_mut()
+            .write_all(restarted_status_line.as_bytes())
+            .await
+            .unwrap();
+
+        line.clear();
+        reader.read_line(&mut line).await.unwrap();
+        assert_eq!(line, "event: connection\n");
+        line.clear();
+        reader.read_line(&mut line).await.unwrap();
+        assert_eq!(line, "data: {\"state\":\"connected\"}\n");
+        line.clear();
+        reader.read_line(&mut line).await.unwrap();
+        assert_eq!(line, "\n");
+        line.clear();
+        reader.read_line(&mut line).await.unwrap();
+        assert!(line.contains("\"window_id\":24"));
 
         server.abort();
-        drop(daemon_reader);
-        drop(daemon);
+        drop(restarted_reader);
+        drop(restarted_stream);
+        drop(restarted_daemon);
         let _ = tokio::fs::remove_file(socket_path).await;
     }
 }
